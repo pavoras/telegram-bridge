@@ -5,6 +5,13 @@
 <h1 align="center">telegram-bridge</h1>
 
 <p align="center">
+  <a href="https://github.com/pavoras/telegram-bridge/actions/workflows/tests.yml"><img src="https://github.com/pavoras/telegram-bridge/actions/workflows/tests.yml/badge.svg" alt="tests"></a>
+  <img src="https://img.shields.io/badge/python-3.10%2B-blue" alt="Python 3.10+">
+  <img src="https://img.shields.io/badge/dependencies-none-brightgreen" alt="no dependencies">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-lightgrey" alt="MIT"></a>
+</p>
+
+<p align="center">
   Your coding agents, on your phone.<br>
   Questions, "I'm done" pings and reports from Claude Code, Codex or any script, on Telegram.<br>
   Answers go back to exactly the agent that asked.
