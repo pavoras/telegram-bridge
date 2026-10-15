@@ -1,0 +1,60 @@
+# telegram-bridge relay behind Caddy (automatic HTTPS).
+#   cp .env.example .env    # set DOMAIN, TG_BOT_TOKEN, language and time zone
+#   docker compose up -d --build
+#   docker compose logs relay | grep "/start"    # the pairing code, send it to your bot
+# Relay only, behind your own reverse proxy: `docker compose up -d --build relay` and publish
+# port 8080 or join your proxy's network instead of the caddy service.
+
+services:
+  relay:
+    build:
+      context: ..
+      dockerfile: relay/Dockerfile
+    image: telegram-bridge-relay:local
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      TG_DB_PATH: /data/relay.db
+      TG_LISTEN: 0.0.0.0:8080
+    volumes:
+      - relay-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 128m
+    cpus: 0.25
+    pids_limit: 64
+    networks: [front, egress]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/v1/health', timeout=5)"]
+      interval: 60s
+      timeout: 10s
+      start_period: 30s
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN in .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks: [front, egress]
+    depends_on: [relay]
+
+networks:
+  front:
+    internal: true   # caddy <-> relay only
+  egress: {}         # outgoing: Telegram (relay), certificates (caddy)
+
+volumes:
+  relay-data:
+  caddy-data:
+  caddy-config:

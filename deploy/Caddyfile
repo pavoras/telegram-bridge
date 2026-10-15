@@ -1,0 +1,13 @@
+{$DOMAIN} {
+	# The relay serves everything under /v1/. Images are at most 10 MB.
+	request_body {
+		max_size 11MB
+	}
+	reverse_proxy relay:8080
+}
+
+# Sharing a domain with other sites instead? Put this into that site's block:
+#	handle_path /tg/* {
+#		reverse_proxy relay:8080
+#	}
+# and use https://example.com/tg as the relay URL.
