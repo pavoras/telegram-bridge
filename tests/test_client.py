@@ -158,7 +158,11 @@ class ClientTest(unittest.TestCase):
         self.assertEqual(self.store.get_message(message_id)["closed_reason"], "closed_by_agent")
 
     def test_relay_down_exit_4_after_three_attempts(self):
-        self.run_tg("setup", "--relay", "http://127.0.0.1:9", "--name", "desktop")
+        import socket
+        with socket.socket() as probe:  # a port that was free a moment ago: nothing listens there
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        self.run_tg("setup", "--relay", f"http://127.0.0.1:{port}", "--name", "desktop")
         with mock.patch.object(tg.RelayClient, "_send_once", wraps=tg.RelayClient._send_once, autospec=True) as send:
             code, _, err = self.run_tg("notify", "hallo")
         self.assertEqual(code, 4)

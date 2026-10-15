@@ -47,7 +47,8 @@ class EndToEndTest(unittest.TestCase):
         self.relay_env = dict(os.environ, TG_BOT_TOKEN_FILE=token_file, TG_CLIENTS_FILE=self.clients_file,
                               TG_ALLOWED_CHAT_ID=str(CHAT), TG_DB_PATH=os.path.join(self.tmp.name, "relay.db"),
                               TG_API_BASE=self.api_base, TG_LISTEN=f"127.0.0.1:{self.port}", PYTHONUNBUFFERED="1",
-                              TG_LANGUAGE="de", TG_TIMEZONE="Europe/Berlin")
+                              TG_LANGUAGE="de", TG_TIMEZONE="Europe/Berlin",
+                              TG_MEDIA_DIR=os.path.join(self.tmp.name, "media"))
         self.configs = {}
         clients = {}
         for name in ("desktop", "laptop"):
@@ -74,8 +75,9 @@ class EndToEndTest(unittest.TestCase):
         return result
 
     def start_relay(self):
+        self.relay_log = open(os.path.join(self.tmp.name, "relay.log"), "w+", encoding="utf-8")
         self.relay = subprocess.Popen([sys.executable, "-m", "relay.main"], cwd=ROOT, env=self.relay_env,
-                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                      stdout=self.relay_log, stderr=subprocess.STDOUT)
 
         def healthy():
             try:
@@ -84,12 +86,18 @@ class EndToEndTest(unittest.TestCase):
             except OSError:
                 return False
 
-        wait_for(healthy, what="relay health")
+        try:
+            wait_for(healthy, what="relay health")
+        except AssertionError:
+            self.relay_log.seek(0)
+            raise AssertionError("relay did not start:\n" + self.relay_log.read()[-3000:]) from None
 
     def stop_relay(self):
         if self.relay and self.relay.poll() is None:
             self.relay.terminate()
             self.relay.wait(10)
+        if getattr(self, "relay_log", None):
+            self.relay_log.close()
 
     def relay_status(self, name, message_id):
         with open(self.configs[name], encoding="utf-8") as f:
