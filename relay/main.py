@@ -79,17 +79,18 @@ def run(config: Config) -> None:
     status = {"last_poll_ok_at": None, "webhook_set": None}
     started_at = time.time()
 
-    try:
-        status["webhook_set"] = bool(tg.get_webhook_info().get("url"))
-        if status["webhook_set"]:
-            log.warning("a webhook is set for this bot; long polling will fail until it is removed")
-    except TelegramError as e:
-        log.warning("getWebhookInfo failed: %s", e)
-    set_command_menu(tg)
     if allowed_chat(config.allowed_chat_id, store) is None:
         log.warning("setup mode: send this to your bot in a private chat:  /start %s", store.pairing_code())
 
     def poller():
+        # Telegram calls run here, not before the API starts: a slow Telegram must not delay /v1/*.
+        try:
+            status["webhook_set"] = bool(tg.get_webhook_info().get("url"))
+            if status["webhook_set"]:
+                log.warning("a webhook is set for this bot; long polling will fail until it is removed")
+        except TelegramError as e:
+            log.warning("getWebhookInfo failed: %s", e)
+        set_command_menu(tg)
         failures: dict = {}
         while not stop.is_set():
             try:
@@ -122,8 +123,9 @@ def run(config: Config) -> None:
     os.makedirs(config.media_dir, exist_ok=True)
     server = make_server(store, clients, config.listen_host, config.listen_port, health, tg=tg,
                          media_dir=config.media_dir, client_dir=config.client_dir)
+    chat = lambda: allowed_chat(config.allowed_chat_id, store)  # noqa: E731 (paired at runtime)
     threads = [threading.Thread(target=poller, daemon=True),
-               threading.Thread(target=outbound.run, args=(store, tg, lambda: allowed_chat(config.allowed_chat_id, store), stop), daemon=True),
+               threading.Thread(target=outbound.run, args=(store, tg, chat, stop), daemon=True),
                threading.Thread(target=scheduler, daemon=True)]
     for thread in threads:
         thread.start()
