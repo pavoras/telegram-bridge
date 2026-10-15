@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+import socketserver
 import uuid
 import threading
 import time
@@ -189,6 +190,16 @@ def _validate_message(body: dict, rights: list) -> dict:
 def _public(msg: dict) -> dict:
     return {"id": msg["id"], "code": msg["code"], "status": msg["status"], "answer": msg["answer"],
             "closed_reason": msg["closed_reason"]}
+
+
+class _Server(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def server_bind(self):
+        # HTTPServer.server_bind resolves the host name (socket.getfqdn), which can block for half a
+        # minute without working reverse DNS (seen on macOS). The name is only used for CGI.
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
 
 
 def make_server(store: Store, clients: Clients, host: str, port: int, health: Callable[[], dict],
@@ -454,6 +465,4 @@ def make_server(store: Store, clients: Clients, host: str, port: int, health: Ca
         def do_POST(self):
             self._handle("POST")
 
-    server = ThreadingHTTPServer((host, port), Handler)
-    server.daemon_threads = True
-    return server
+    return _Server((host, port), Handler)

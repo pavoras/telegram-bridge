@@ -1,6 +1,7 @@
 """In-process fake of the Telegram Bot API for tests."""
 import email
 import json
+import socketserver
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -76,6 +77,10 @@ class FakeTelegram:
 
         class QuietServer(ThreadingHTTPServer):
             daemon_threads = True
+
+            def server_bind(self):  # skip the reverse DNS lookup of HTTPServer.server_bind
+                socketserver.TCPServer.server_bind(self)
+                self.server_name, self.server_port = self.server_address[:2]
 
             def handle_error(self, request, client_address):
                 pass  # clients (e.g. a killed relay) may drop connections mid-request
