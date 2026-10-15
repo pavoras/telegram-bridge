@@ -69,6 +69,7 @@ def set_command_menu(tg: TelegramClient) -> bool:
 
 
 def run(config: Config) -> None:
+    log.info("starting (language %s, time zone %s)", config.language, config.timezone)
     i18n.configure(config.language, config.timezone)
     store = Store(config.db_path)
     store.init_schema()

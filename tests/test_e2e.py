@@ -90,7 +90,8 @@ class EndToEndTest(unittest.TestCase):
             wait_for(healthy, what="relay health")
         except AssertionError:
             self.relay_log.seek(0)
-            raise AssertionError("relay did not start:\n" + self.relay_log.read()[-3000:]) from None
+            raise AssertionError(f"relay did not start (exit code {self.relay.poll()}):\n"
+                                 + self.relay_log.read()[-3000:]) from None
 
     def stop_relay(self):
         if self.relay and self.relay.poll() is None:

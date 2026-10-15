@@ -163,10 +163,16 @@ class ClientTest(unittest.TestCase):
             probe.bind(("127.0.0.1", 0))
             port = probe.getsockname()[1]
         self.run_tg("setup", "--relay", f"http://127.0.0.1:{port}", "--name", "desktop")
-        with mock.patch.object(tg.RelayClient, "_send_once", wraps=tg.RelayClient._send_once, autospec=True) as send:
+        calls, real = [], tg.RelayClient._send_once
+
+        def counting(client, *args):  # autospec + wraps does not call through on Python 3.10
+            calls.append(args)
+            return real(client, *args)
+
+        with mock.patch.object(tg.RelayClient, "_send_once", counting):
             code, _, err = self.run_tg("notify", "hallo")
         self.assertEqual(code, 4)
-        self.assertEqual(send.call_count, 3)
+        self.assertEqual(len(calls), 3)
         self.assertIn("relay", err.lower())
 
     def test_retry_after_network_error_does_not_duplicate_question(self):
