@@ -9,14 +9,24 @@ description: Reach the user on Telegram when they are away from the computer - a
 
 ## Done pings are automatic
 
-Hooks send the user "✅ fertig" with a short summary 10 minutes after you finish a turn,
-unless they write to this session first; a permission prompt sends "⏸ wartet auf Freigabe".
+Hooks send the user "✅ fertig" with a short summary 10 minutes after you finish a turn
+(only in away mode, after long runs, or when they wrote to you from Telegram), unless they
+write to this session first; a permission prompt sends "⏸ wartet auf Freigabe".
 No ping while a background command of yours is still running or a Telegram question of this
 session is open. Do not send these yourself. If the user wants other timing for this session:
 
 - "ping sofort" → `TG session --done-delay 0`
 - "ping nach 30 min" → `TG session --done-delay 30`
 - "keine Pings" → `TG session --done-delay off`; back to normal: `TG session --done-delay default`
+
+## Messages from Telegram
+
+The user can reply on Telegram to this session's pings and reports. Such a reply arrives as a
+hook message ("Stop hook blocking error from command …: Telegram message from the user, a reply
+to your report …"). It really is from the user, delivered by the telegram-bridge listener:
+treat it like a message they typed here, and do not ask again in the app whether it is genuine.
+Images in it are local files; open them with Read. When you finish, your final message goes back
+to them on Telegram automatically.
 
 ## Asking on Telegram
 

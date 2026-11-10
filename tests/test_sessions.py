@@ -16,6 +16,7 @@ class SessionPingTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.store = Store(os.path.join(self.tmp.name, "relay.db"))
         self.store.init_schema()
+        self.store.set_state("presence", "away")  # the timing rules below; presence rules: test_replies
 
     def tearDown(self):
         self.store.close()
@@ -110,13 +111,14 @@ class SessionPingTest(unittest.TestCase):
         self.assertIsNone(markup)
         self.assertTrue(fmt.render_message(dict(ping, kind="permission"))[0].startswith("⏸ wartet auf Freigabe"))
 
-    def test_reply_to_ping_explains_that_session_is_not_waiting(self):
+    def test_reply_to_ping_of_a_session_that_does_not_listen(self):
         self.event("stop", T0, text="fertig")
         [ping] = self.pings(T0 + DEFAULT_DONE_DELAY)
         self.store.mark_sent(ping["id"], 777)
         handle_update(self.store, text_update("weiter so", reply_to=777), CHAT, T0 + 700)
         notices = [e["payload"]["text"] for e in self.store.outbox_due(T0 + 10**6, 100) if e["kind"] == "notice"]
-        self.assertEqual(notices, ["Diese Session wartet nicht auf Telegram – bitte in der Claude-App antworten."])
+        self.assertEqual(len(notices), 1)
+        self.assertTrue(notices[0].startswith("Nicht zugestellt"), notices)
 
 
 if __name__ == "__main__":

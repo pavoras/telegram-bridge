@@ -114,8 +114,8 @@ def route(store: Store, incoming: dict, now: float) -> None:
     reply = incoming["reply_to"]
     if reply:
         target = store.message_for_tg(reply)
-        if target is not None and target["kind"] in ("done", "permission"):
-            notice(t("not_waiting"))
+        if target is not None and target["kind"] in ("done", "permission", "report"):
+            pass_to_session(store, target, incoming, now, notice)
         elif target is None or target["kind"] != "question":
             notice(t("cannot_reply"))
         else:
@@ -143,6 +143,18 @@ def route(store: Store, incoming: dict, now: float) -> None:
                buttons=[(_label(q)[:60], f"a:{seq}:{q['seq']}") for q in open_questions])
     else:
         notice(t("no_open_question"))
+
+
+def pass_to_session(store: Store, report: dict, incoming: dict, now: float, notice) -> None:
+    """A reply to a session's report or ping: hand it to the session's listener, or say at once that
+    nobody listens. Nothing is kept for later."""
+    if not incoming["text"].strip() and not incoming["images"]:
+        notice(t("answer_missing"))
+    elif not report.get("session_key") or not store.add_reply(report, incoming["text"], incoming["images"],
+                                                               incoming["message_id"], now):
+        notice(t("not_listening"))
+    elif report["kind"] == "permission":
+        notice(t("reply_permission"))
 
 
 def _handle_command(store: Store, text: str, now: float, notice) -> None:

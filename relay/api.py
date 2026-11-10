@@ -37,12 +37,15 @@ MEDIA_PATH = re.compile(r"^/v1/media/([0-9a-f]{32})$")
 # Public files for setting up a new machine (the client is open source, nothing secret in them).
 CLIENT_PATH = re.compile(r"^/v1/client/(tg\.py|SKILL\.md|AGENT-INSTRUCTIONS\.md|SETUP\.md)$")
 MAX_DONE_DELAY = 7 * 86400
-EVENT_TYPES = ("stop", "permission", "prompt")
+EVENT_TYPES = ("stop", "permission", "prompt", "end")
+MAX_LISTENERS = 64  # waiting session listeners have their own connection slots
+LISTEN_RATE_LIMIT = 240  # per client and minute: one listener per open session
+LISTENER_ID = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
 
 MESSAGE_PATH = re.compile(r"^/v1/messages/([0-9a-f-]{36})(/close)?$")
 DEVICE_NAME = re.compile(r"^[a-z0-9-]{1,32}$")
 SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
-SESSION_PATH = re.compile(r"^/v1/sessions/([A-Za-z0-9_.:-]{1,100})(/events)?$")
+SESSION_PATH = re.compile(r"^/v1/sessions/([A-Za-z0-9_.:-]{1,100})(/events|/listen)?$")
 
 log = logging.getLogger("relay.api")
 
@@ -103,16 +106,17 @@ class ApiError(Exception):
 
 
 class _RateLimiter:
-    def __init__(self):
+    def __init__(self, limit: int = RATE_LIMIT):
         self._hits = defaultdict(deque)
         self._lock = threading.Lock()
+        self._limit = limit
 
     def allow(self, client_id: str, now: float) -> bool:
         with self._lock:
             hits = self._hits[client_id]
             while hits and hits[0] <= now - RATE_WINDOW:
                 hits.popleft()
-            if len(hits) >= RATE_LIMIT:
+            if len(hits) >= self._limit:
                 return False
             hits.append(now)
             return True
@@ -206,6 +210,8 @@ def make_server(store: Store, clients: Clients, host: str, port: int, health: Ca
                 tg: Optional[TelegramClient] = None, media_dir: Optional[str] = None,
                 client_dir: Optional[str] = None) -> ThreadingHTTPServer:
     limiter = _RateLimiter()
+    listen_limiter = _RateLimiter(LISTEN_RATE_LIMIT)
+    listen_slots = threading.BoundedSemaphore(MAX_LISTENERS)
     upload_lock = threading.Lock()  # quota check, file and row as one step
     slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
 
@@ -261,7 +267,10 @@ def make_server(store: Store, clients: Clients, host: str, port: int, health: Ca
         def _handle(self, method: str) -> None:
             url = urlparse(self.path)
             template, client_id, status = url.path, "-", 500
-            if not slots.acquire(blocking=False):
+            session = SESSION_PATH.match(url.path)
+            listen = method == "GET" and session is not None and session.group(2) == "/listen"
+            pool = listen_slots if listen else slots  # idle listeners must not block everything else
+            if not pool.acquire(blocking=False):
                 self.close_connection = True
                 log.info("%s %s %s %s", method, template, 503, client_id)
                 self._send(503, {"error": "busy"})
@@ -270,7 +279,6 @@ def make_server(store: Store, clients: Clients, host: str, port: int, health: Ca
                 match = MESSAGE_PATH.match(url.path)
                 if match:
                     template = "/v1/messages/{id}" + (match.group(2) or "")
-                session = SESSION_PATH.match(url.path)
                 if session:
                     template = "/v1/sessions/{key}" + (session.group(2) or "")
                 media = MEDIA_PATH.match(url.path)
@@ -288,9 +296,11 @@ def make_server(store: Store, clients: Clients, host: str, port: int, health: Ca
                     if auth is None:
                         raise ApiError(401, "unauthorized")
                     client_id, rights = auth
-                    if not limiter.allow(client_id, time.time()):
+                    if not (listen_limiter if listen else limiter).allow(client_id, time.time()):
                         raise ApiError(429, "rate_limited")
-                    if session and method == "POST":
+                    if listen:
+                        status, payload = self._listen(session.group(1), url, client_id, rights)
+                    elif session and method == "POST" and session.group(2) != "/listen":
                         status, payload = self._session(session, client_id, rights)
                     elif method == "POST" and url.path == "/v1/media":
                         status, payload = self._upload(client_id, rights)
@@ -307,7 +317,7 @@ def make_server(store: Store, clients: Clients, host: str, port: int, health: Ca
                 log.exception("unhandled error")
                 status, payload = 500, {"error": "internal"}
             finally:
-                slots.release()
+                pool.release()
             log.info("%s %s %s %s", method, template, status, client_id)
             if payload is not None:
                 self._send(status, payload)
@@ -446,6 +456,30 @@ def make_server(store: Store, clients: Clients, host: str, port: int, health: Ca
             delay = _validate_done_delay(body)
             store.set_done_delay(client_id, key, delay, time.time())
             return 200, {"done_delay": delay}
+
+        def _listen(self, key, url, client_id, rights):
+            """Long poll of a session's listener: a reply to one of its reports, or idle / superseded."""
+            if "full" not in rights:
+                raise ApiError(403, "forbidden")
+            query = parse_qs(url.query)
+            listener = query.get("listener", [""])[0]
+            if not LISTENER_ID.match(listener):
+                raise ApiError(400, "listener")
+            try:
+                started = float(query.get("started", ["0"])[0])
+                wait = min(MAX_WAIT, max(0.0, float(query.get("wait", ["0"])[0])))
+            except ValueError:
+                raise ApiError(400, "wait") from None
+            deadline = time.time() + wait
+            result = store.listen(client_id, key, listener, started, time.time())
+            while result["result"] == "idle" and time.time() < deadline:
+                time.sleep(min(POLL_INTERVAL, max(0.0, deadline - time.time())))
+                state = store.listen_state(client_id, key, listener)
+                if state == "superseded":
+                    return 200, {"result": "superseded"}
+                if state == "pending":
+                    result = store.listen(client_id, key, listener, started, time.time())
+            return 200, result
 
         @staticmethod
         def _wait(msg: dict, url) -> dict:

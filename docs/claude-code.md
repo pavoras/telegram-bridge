@@ -23,7 +23,13 @@ command, which wakes the session when you answer) and the rules (no secrets, sho
 | `Stop` | – | schedule "✅ done" with a summary of Claude's last message |
 | `Notification` | `permission_prompt` | schedule "⏸ waiting for approval (since 14:02)" with the request |
 | `UserPromptSubmit` | – | cancel the scheduled ping; a prompt typed by you also closes this session's open Telegram questions |
+| `SessionEnd` | – | the session's listener stops (see "Replying to a session") |
+| `Stop`, `UserPromptSubmit` | – | `tg hook listen` in the background (`asyncRewake`), waiting for your Telegram replies |
 
+- A ping is sent only if it is useful: in away mode (checked when the ping is due), when the
+  turn ends an hour or more after your last message to the session (a long autonomous run),
+  or when your last message came from Telegram (then right away). Short work you do at the
+  computer gets no ping.
 - The relay schedules the ping (default 10 minutes), so nothing runs on your computer in the
   meantime and a reboot loses nothing.
 - No ping while the session still runs a background command or waits for a Telegram answer.
@@ -36,8 +42,26 @@ command, which wakes the session when you answer) and the rules (no secrets, sho
   the event goes to a local spool and is sent with the next hook call.
 - Summaries that look like they contain a secret are withheld.
 
-Replying to a done ping in Telegram does not reach the session (it is not waiting); the bot
-tells you to answer in the app. With Remote Control (below) you can do that from the phone.
+## Replying to a session
+
+Swipe-reply in Telegram to a done ping, a permission ping or a report of a Claude Code session,
+and the session gets your message as if you had typed it in the app:
+
+- An idle session wakes up and works on it; a working session reads it at its next tool call.
+- The bot confirms with "➡️ passed to project · title". When the session finishes, its answer
+  comes back as a done ping right away.
+- Photos and albums work too; the session gets them as local files.
+- If the session can't listen (computer off, app closed, session ended), the bot says so at
+  once and keeps nothing. Answer in the app then.
+- A reply to a permission ping reaches the session, but approving the request itself still
+  happens in the app.
+- Only replies go to sessions. Plain messages and `#code` answer open questions as before.
+
+How it works: the hooks start `tg hook listen` as a background hook with `asyncRewake` after
+every turn and every prompt. It long-polls the relay; when a reply arrives it prints it and
+exits with code 2, which Claude Code hands to the session. A newer listener of the same session
+replaces the older one; a listener ends itself after about 24 hours. Needs Claude Code 2.1.295
+or later; with an older version the hook does nothing.
 
 ## Away mode
 

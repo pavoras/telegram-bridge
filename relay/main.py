@@ -107,6 +107,7 @@ def run(config: Config) -> None:
             try:
                 store.expire_due(now)
                 store.send_due_pings(now)
+                store.drop_stale_replies(now)
                 flush_albums(store, now)
                 if allowed_chat(config.allowed_chat_id, store) is not None:
                     check_daily(store, now)

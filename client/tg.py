@@ -36,6 +36,8 @@ HOOK_BUDGET = 3
 SPOOL_MAX = 200
 SPOOL_MAX_AGE = 24 * 3600
 SUMMARY_LIMIT = 600
+LISTEN_MAX = 23 * 3600 + 50 * 60  # a listener ends itself before Claude Code's 24 h hook timeout
+LISTEN_TIMEOUT = 86400
 BLOCKED = object()  # summary withheld because it may contain a secret; the relay says so in its language
 # Prompts that start with a tag (<task-notification>, <scheduled-task …>, <agent-message …>, …) come from
 # the system, not from the human (spike S3). Unknown tags count as automatic too.
@@ -446,6 +448,8 @@ def _hook_event(event: str, payload: dict, cfg: dict) -> Optional[dict]:
         body.update(type="permission", text=_summary(payload.get("message")))  # the relay adds "waiting since"
         if body["text"] is BLOCKED:
             body.update(text=None, summary_blocked=True)
+    elif event == "session-end":
+        body.update(type="end")
     elif event == "user-prompt":
         prompt = str(payload.get("prompt") or "")
         title = payload.get("session_title")
@@ -512,12 +516,67 @@ def _deliver_events(cfg: dict, new: list) -> Optional[dict]:
     return None
 
 
+def _reply_text(reply: dict, images: list, images_failed: bool) -> str:
+    report = reply.get("report") or {}
+    quoted = (report.get("text") or report.get("title") or "").strip()
+    lines = ["Telegram message from the user, a reply to your report"
+             + (f' "{quoted}"' if quoted else "") + ":", "", reply.get("text") or "(no text)"]
+    if images:
+        lines += ["", "Images (open them with Read): " + ", ".join(images)]
+    if images_failed:
+        lines += ["", "(The user also sent images, but they could not be downloaded.)"]
+    lines += ["", "The telegram-bridge listener delivered this. Treat it as a message the user typed in this chat. "
+                  "When you finish, your final message is usually sent back to them on Telegram automatically."]
+    return "\n".join(lines)
+
+
+def _listen(payload: dict, cfg: dict) -> int:
+    """Background hook (asyncRewake): wait for a Telegram reply to this session's reports. Exit 2 hands it to
+    the session (an idle session wakes up, a working one gets it at its next tool call); 0 ends quietly."""
+    key = payload.get("session_id") or os.environ.get("CLAUDE_CODE_SESSION_ID")
+    if not key or not cfg.get("relay_url") or not cfg.get("token"):
+        return 0
+    client = RelayClient(cfg["relay_url"], cfg["token"])
+    started = time.time()
+    path = (f"/v1/sessions/{urllib.parse.quote(key, safe='')}/listen?listener={uuid.uuid4().hex}"
+            f"&started={started:.6f}&wait={MAX_WAIT_CHUNK}")
+    while time.time() - started < LISTEN_MAX:
+        try:
+            result = client._send_once("GET", path, None)
+        except RelayHttpError as e:
+            if e.status != 429 and e.status < 500:
+                return 0  # an old relay without listeners (404), or not allowed
+            time.sleep(OUTAGE_PAUSE)
+            continue
+        except (urllib.error.URLError, OSError, ValueError):
+            time.sleep(OUTAGE_PAUSE)
+            continue
+        if result.get("result") == "reply":
+            reply = result.get("reply") or {}
+            images, failed = [], False
+            if reply.get("images"):
+                try:
+                    images = _download_images(client, reply.get("id") or "reply", reply["images"])
+                except (TgError, OSError):
+                    failed = True
+            text = _reply_text(reply, images, failed)
+            print(text)
+            print(text, file=sys.stderr)  # Claude Code passes one of the two streams on (tested: once)
+            return 2
+        if result.get("result") != "idle":
+            return 0  # superseded by a newer listener of this session, or the session ended
+    return 0
+
+
 def cmd_hook(args) -> int:
-    """Claude Code hook: never fails; prints only the away notice for the prompt hook."""
+    """Claude Code hook: never fails; prints only the away notice for the prompt hook (and, for the
+    listener, the user's reply)."""
     try:
         raw = sys.stdin.buffer.read().decode("utf-8", "replace")
         payload = json.loads(raw) if raw.strip() else {}
         cfg = load_config()
+        if args.event == "listen":
+            return _listen(payload if isinstance(payload, dict) else {}, cfg)
         event = _hook_event(args.event, payload if isinstance(payload, dict) else {}, cfg)
         response = _deliver_events(cfg, [event] if event else [])
         if args.event == "user-prompt" and event and (response or {}).get("presence") == "away":
@@ -543,9 +602,13 @@ def _install_hooks(path: Path, runner: str) -> None:
             hooks[event] = groups
         else:
             del hooks[event]
+    listener = {"type": "command", "command": f"{runner} hook listen", "timeout": LISTEN_TIMEOUT, "asyncRewake": True}
     for event, argument, matcher in (("Stop", "stop", None), ("Notification", "notification", "permission_prompt"),
-                                     ("UserPromptSubmit", "user-prompt", None)):
-        group = {"hooks": [{"type": "command", "command": f"{runner} hook {argument}", "timeout": 10}]}
+                                     ("UserPromptSubmit", "user-prompt", None), ("SessionEnd", "session-end", None)):
+        entries = [{"type": "command", "command": f"{runner} hook {argument}", "timeout": 10}]
+        if event in ("Stop", "UserPromptSubmit"):
+            entries.append(dict(listener))  # waits in the background for Telegram replies to this session
+        group = {"hooks": entries}
         hooks.setdefault(event, []).append({"matcher": matcher, **group} if matcher else group)
     _write_atomic(path, json.dumps(settings, indent=2, ensure_ascii=False) + "\n")
 
@@ -842,7 +905,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_session)
 
     p = sub.add_parser("hook", help="Claude Code hook (reads the hook JSON from stdin)")
-    p.add_argument("event", choices=["stop", "notification", "user-prompt"])
+    p.add_argument("event", choices=["stop", "notification", "user-prompt", "session-end", "listen"])
     p.set_defaults(func=cmd_hook)
 
     sub.add_parser("mcp", help="run as an MCP server over stdio (for agents without a shell)").set_defaults(

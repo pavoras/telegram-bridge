@@ -47,8 +47,12 @@ Migration 0042 drops column legacy_id. Run it on production now?
   never at the wrong one: explicit targets are never rerouted, ambiguous messages get a picker.
 - **"Done" pings for Claude Code.** Hooks send `✅ done` with a short summary 10 minutes after
   a session finishes its turn, unless you are back at the keyboard first. A permission prompt
-  sends `⏸ waiting for approval`. The delay is adjustable per session ("ping me right away",
-  "no pings").
+  sends `⏸ waiting for approval`. Only when it matters: in away mode, after a run of an hour or
+  more, or when you wrote to the session from Telegram. The delay is adjustable per session
+  ("ping me right away", "no pings").
+- **Reply to keep a session going.** Swipe-reply to a ping or report of a Claude Code session
+  and the session gets your message: an idle one wakes up, a working one reads it at its next
+  step. If the session can't listen (computer off, app closed), the bot says so at once.
 - **Away mode.** Send `/away` to the bot and every Claude Code session learns at its next
   prompt that it should ask you on Telegram instead of in the app. `/back` ends it.
 - **Images both ways.** Agents attach screenshots; you answer with photos or albums, which
@@ -127,6 +131,7 @@ Details, other reverse proxies and running without Docker: [docs/self-hosting.md
 | See what is open | `/open`, `/status` |
 | Answer a question | tap a button, reply to it, or `#482 your answer` |
 | Faster or no done pings in a session | tell the agent "ping me right away" / "no pings" |
+| Send a Claude Code session a message | reply (swipe) to its ping or report |
 | The daily report | `/daily on` and a scheduled task, see [docs/claude-code.md](docs/claude-code.md#daily-report) |
 
 German commands work too (`/offen`, `/weg`, `/da`, `/hilfe`, `/daily an`).

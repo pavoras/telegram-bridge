@@ -18,6 +18,9 @@ RETENTION = 7 * DAY
 QUESTION_TTL = DAY
 ASSIGNMENT_TTL = 600
 DEFAULT_DONE_DELAY = 600
+LONG_RUN = 3600  # a turn ending this long after the user's last message is worth a ping even when present
+LISTEN_FRESH = 90  # a session listens if its listener asked within this many seconds
+REPLY_TTL = 300  # a reply nobody picked up by then is dropped
 REGISTER_INTERVAL = 60
 MAX_PENDING_DEVICES = 3
 OPEN = ("queued", "sent")
@@ -83,8 +86,27 @@ CREATE TABLE IF NOT EXISTS sessions (
     ping_kind TEXT,
     ping_text TEXT,
     last_event_at REAL,
+    ping_force INTEGER,
+    last_human_at REAL,
+    human_via TEXT,
+    listener TEXT,
+    listener_started REAL,
+    listener_seen REAL,
     PRIMARY KEY (client_id, session_key)
 );
+CREATE TABLE IF NOT EXISTS replies (
+    id TEXT PRIMARY KEY,
+    client_id TEXT NOT NULL,
+    session_key TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    text TEXT NOT NULL,
+    images TEXT,
+    inbound_tg_id INTEGER,
+    status TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    delivered_at REAL
+);
+CREATE INDEX IF NOT EXISTS replies_session ON replies(client_id, session_key, status);
 CREATE TABLE IF NOT EXISTS devices (
     seq INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
@@ -123,8 +145,17 @@ CREATE TABLE IF NOT EXISTS state (
 """
 
 _JSON_FIELDS = ("buttons", "origin", "answer", "images")
+SESSION_COLUMNS = (("ping_force", "INTEGER"), ("last_human_at", "REAL"), ("human_via", "TEXT"),
+                   ("listener", "TEXT"), ("listener_started", "REAL"), ("listener_seen", "REAL"))
 
 MAX_PAIRING_FAILURES = 5
+
+
+def session_label(msg: dict) -> str:
+    """Project · title of a session's message, for confirmations."""
+    origin = msg.get("origin") or {}
+    parts = [p for p in (origin.get("project"), msg.get("title") or origin.get("title")) if p]
+    return " · ".join(parts) or origin.get("agent") or "?"
 
 
 class Store:
@@ -143,6 +174,10 @@ class Store:
             columns = {r[1] for r in self._conn.execute("PRAGMA table_info(messages)")}
             if "images" not in columns:  # databases from version 0.1
                 self._conn.execute("ALTER TABLE messages ADD COLUMN images TEXT")
+            columns = {r[1] for r in self._conn.execute("PRAGMA table_info(sessions)")}
+            for name, kind in SESSION_COLUMNS:  # databases from before replies to reports
+                if name not in columns:
+                    self._conn.execute(f"ALTER TABLE sessions ADD COLUMN {name} {kind}")
 
     def close(self) -> None:
         with self._lock:
@@ -297,6 +332,7 @@ class Store:
             db.execute("DELETE FROM devices WHERE status IN ('pending', 'rejected') AND created_at < ?",
                        (now - DAY,))
             db.execute("DELETE FROM sessions WHERE last_event_at < ? AND ping_due IS NULL", (cutoff,))
+            db.execute("DELETE FROM replies WHERE created_at < ?", (cutoff,))
             return removed
 
     def purge_orphan_files(self, media_dir: str, now: float, min_age: float = 3600) -> int:
@@ -381,10 +417,16 @@ class Store:
     def session_event(self, client_id: str, key: str, kind: str, ts: float, origin: Optional[dict] = None,
                       text: Optional[str] = None, title: Optional[str] = None, human: bool = False,
                       busy: bool = False) -> str:
-        """Apply a hook event ("stop", "permission" or "prompt") and plan or cancel the session's ping.
-        Returns "scheduled", "cancelled" or "stale" (older than the last event, ignored)."""
+        """Apply a hook event ("stop", "permission", "prompt" or "end") and plan or cancel the session's ping.
+        Returns "scheduled", "cancelled", "ended" or "stale" (older than the last event, ignored)."""
         with self.tx() as db:
             row = self._session(db, client_id, key, origin)
+            if kind == "end":  # the session closed: its listener stops, replies for it are not delivered
+                db.execute("UPDATE sessions SET listener = NULL,"
+                           " listener_started = MAX(COALESCE(listener_started, ?), ?)"
+                           " WHERE client_id = ? AND session_key = ?", (ts, ts, client_id, key))
+                self._drop_replies(db, "client_id = ? AND session_key = ?", (client_id, key), ts)
+                return "ended"
             if row["last_event_at"] is not None and ts < row["last_event_at"]:
                 return "stale"
             db.execute("UPDATE sessions SET last_event_at = ?, title = COALESCE(?, title)"
@@ -395,6 +437,8 @@ class Store:
             open_ids = [r["id"] for r in open_questions]
             delay = DEFAULT_DONE_DELAY if row["done_delay"] is None else row["done_delay"]
             if kind == "prompt" and human:
+                db.execute("UPDATE sessions SET last_human_at = ?, human_via = 'app'"
+                           " WHERE client_id = ? AND session_key = ?", (ts, client_id, key))
                 for question in open_questions:
                     if question["created_at"] <= ts:
                         self.close_question(question["id"], "answered_in_app", ts)
@@ -404,9 +448,15 @@ class Store:
                 return "cancelled"
             if kind == "permission":
                 text = t("waiting_since", time=local_time(ts).strftime("%H:%M"), message=text or t("approval_needed"))
-            db.execute("UPDATE sessions SET ping_due = ?, ping_kind = ?, ping_text = ?"
+            # Pinged whatever the presence: when the user's last message came from Telegram (then at once),
+            # or when the turn ends long after it (a long autonomous run). Otherwise only when away (checked
+            # at send time): short work at the computer needs no ping.
+            via_telegram = row["human_via"] == "telegram"
+            force = via_telegram or row["last_human_at"] is None or ts - row["last_human_at"] >= LONG_RUN
+            db.execute("UPDATE sessions SET ping_due = ?, ping_kind = ?, ping_text = ?, ping_force = ?"
                        " WHERE client_id = ? AND session_key = ?",
-                       (ts + delay, "permission" if kind == "permission" else "done", text, client_id, key))
+                       (ts if via_telegram else ts + delay, "permission" if kind == "permission" else "done", text,
+                        1 if force else 0, client_id, key))
             return "scheduled"
 
     def set_done_delay(self, client_id: str, key: str, delay: Optional[int], now: float) -> None:
@@ -423,9 +473,12 @@ class Store:
             rows = db.execute("SELECT * FROM sessions WHERE ping_due IS NOT NULL AND ping_due <= ?",
                               (now,)).fetchall()
             sent = 0
+            away = self.get_state("presence") == "away"
             for r in rows:
                 db.execute("UPDATE sessions SET ping_due = NULL WHERE client_id = ? AND session_key = ?",
                            (r["client_id"], r["session_key"]))
+                if not (away or r["ping_force"]):
+                    continue  # short work at the computer: the user sees the result in the app
                 if db.execute(f"SELECT 1 FROM messages WHERE client_id = ? AND session_key = ?"
                               f" AND kind = 'question' AND status IN {OPEN}",
                               (r["client_id"], r["session_key"])).fetchone():
@@ -435,6 +488,78 @@ class Store:
                                     json.loads(r["origin"] or "{}"), f"ping:{r['session_key']}:{r['ping_due']}",
                                     now, title=r["title"], session_key=r["session_key"])
             return sent
+
+    # --- replies to reports, handed to the session's listener (a background hook in Claude Code) ----
+    def listening(self, client_id: str, key: str, now: float) -> bool:
+        return bool(self._query("SELECT 1 FROM sessions WHERE client_id = ? AND session_key = ?"
+                                " AND listener IS NOT NULL AND listener_seen >= ?",
+                                (client_id, key, now - LISTEN_FRESH)))
+
+    def add_reply(self, report: dict, text: str, images: list, inbound_tg_id: int, now: float) -> bool:
+        """Hold a Telegram reply to a report for the session's listener; False if the session is not listening."""
+        with self.tx() as db:
+            if not self.listening(report["client_id"], report["session_key"], now):
+                return False
+            db.execute("INSERT INTO replies (id, client_id, session_key, message_id, text, images, inbound_tg_id,"
+                       " status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)",
+                       (uuid.uuid4().hex, report["client_id"], report["session_key"], report["id"], text,
+                        json.dumps(images) if images else None, inbound_tg_id, now))
+            for media_id in images:  # downloadable by the report's client
+                db.execute("UPDATE media SET message_id = ? WHERE id = ? AND direction = 'in'",
+                           (report["id"], media_id))
+            return True
+
+    def listen(self, client_id: str, key: str, listener: str, started: float, now: float) -> dict:
+        """Register or refresh the session's listener and hand it the oldest pending reply.
+        The listener started last wins; an older one gets {"result": "superseded"}."""
+        with self.tx() as db:
+            row = self._session(db, client_id, key, None)
+            if row["listener"] != listener:
+                if row["listener_started"] is not None and started < row["listener_started"]:
+                    return {"result": "superseded"}
+                db.execute("UPDATE sessions SET listener = ?, listener_started = ?"
+                           " WHERE client_id = ? AND session_key = ?", (listener, started, client_id, key))
+            db.execute("UPDATE sessions SET listener_seen = ?, last_event_at = COALESCE(last_event_at, ?)"
+                       " WHERE client_id = ? AND session_key = ?", (now, now, client_id, key))
+            reply = db.execute("SELECT * FROM replies WHERE client_id = ? AND session_key = ? AND status = 'pending'"
+                               " ORDER BY created_at LIMIT 1", (client_id, key)).fetchone()
+            if reply is None:
+                return {"result": "idle"}
+            db.execute("UPDATE replies SET status = 'delivered', delivered_at = ? WHERE id = ?", (now, reply["id"]))
+            # The reply is the user's message: it cancels a planned ping, and the turn it starts is reported
+            # back on Telegram.
+            db.execute("UPDATE sessions SET last_human_at = ?, human_via = 'telegram', ping_due = NULL"
+                       " WHERE client_id = ? AND session_key = ?", (now, client_id, key))
+            report = self.get_message(reply["message_id"]) or {}
+            self._enqueue(db, "notice", {"text": t("reply_passed", label=session_label(report)),
+                                         "reply_to": reply["inbound_tg_id"], "buttons": None}, now)
+            return {"result": "reply", "reply": {
+                "id": reply["id"], "text": reply["text"], "images": json.loads(reply["images"] or "[]"),
+                "report": {"kind": report.get("kind"), "title": report.get("title"),
+                           "text": (report.get("text") or "").strip().split("\n")[0][:200]}}}
+
+    def listen_state(self, client_id: str, key: str, listener: str) -> str:
+        """Cheap check while a listener waits: "superseded", "pending" or "idle"."""
+        rows = self._query("SELECT listener, EXISTS (SELECT 1 FROM replies r WHERE r.client_id = s.client_id"
+                           " AND r.session_key = s.session_key AND r.status = 'pending') FROM sessions s"
+                           " WHERE client_id = ? AND session_key = ?", (client_id, key))
+        if not rows or rows[0][0] != listener:
+            return "superseded"
+        return "pending" if rows[0][1] else "idle"
+
+    def drop_stale_replies(self, now: float) -> int:
+        """Replies nobody picked up within REPLY_TTL (the listener went away): tell the user."""
+        with self.tx() as db:
+            return self._drop_replies(db, "created_at <= ?", (now - REPLY_TTL,), now)
+
+    def _drop_replies(self, db, where: str, args: tuple, now: float) -> int:
+        rows = db.execute(f"SELECT id, inbound_tg_id FROM replies WHERE status = 'pending' AND {where}",
+                          args).fetchall()
+        for r in rows:
+            db.execute("UPDATE replies SET status = 'dropped' WHERE id = ?", (r["id"],))
+            self._enqueue(db, "notice", {"text": t("reply_dropped"), "reply_to": r["inbound_tg_id"],
+                                         "buttons": None}, now)
+        return len(rows)
 
     # --- devices registered through Telegram ------------------------------------
     def register_device(self, name: str, sha256: str, host: Optional[str], now: float) -> str:

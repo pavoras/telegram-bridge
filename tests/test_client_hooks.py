@@ -2,6 +2,7 @@ import io
 import json
 import os
 import sys
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -45,6 +46,7 @@ class ClientPhase2Test(test_client.ClientTest):
 
     def test_hook_stop_schedules_ping_with_summary(self):
         self.start_relay()
+        self.store.set_state("presence", "away")  # short work while present gets no ping
         self.hook("user-prompt", {"session_id": "s-hook", "prompt": "Bitte Login fixen", "session_title": "Löwe",
                                   "cwd": "C:\\Projekte\\WebApp"})
         code, out, _ = self.hook("stop", {"session_id": "s-hook", "cwd": "C:\\Projekte\\WebApp",
@@ -153,6 +155,48 @@ class ClientPhase2Test(test_client.ClientTest):
         [path] = answer["images"]
         self.assertEqual(Path(path).read_bytes(), JPEG)
 
+    def report_and_reply(self, update):
+        """Once the listener listens: a report of session s-listen, sent as Telegram message 950, and a reply."""
+        deadline = time.time() + 5
+        while not self.store.listening("desktop", "s-listen", time.time()) and time.time() < deadline:
+            time.sleep(0.05)
+        report = self.store.create_message("desktop", "report", "Zwischenstand: Login geht\nmehr", {"project": "P"},
+                                           "r-listen", time.time(), session_key="s-listen")
+        self.store.mark_sent(report["id"], 950)
+        handle_update(self.store, update, CHAT, time.time())
+
+    def test_listen_hook_hands_a_reply_to_the_session(self):
+        fake = FakeTelegram()
+        self.addCleanup(fake.stop)
+        fake.files["F1"] = JPEG
+        self.start_relay(TelegramClient(fake.start(), TOKEN))
+        threading.Timer(0.2, self.report_and_reply,
+                        [photo_update("F1", caption="Bitte auch Logout", reply_to=950)]).start()
+        with mock.patch.dict(os.environ, {"TG_DOWNLOAD_DIR": os.path.join(self.tmp.name, "downloads")}):
+            code, out, err = self.hook("listen", {"session_id": "s-listen"})
+        self.assertEqual(code, 2)
+        self.assertEqual(out, err, "the text goes to both streams")
+        self.assertIn('a reply to your report "Zwischenstand: Login geht"', out)
+        self.assertIn("Bitte auch Logout", out)
+        path = out.split("Images (open them with Read): ")[1].split("\n")[0]
+        self.assertEqual(Path(path).read_bytes(), JPEG)
+
+    def test_listen_hook_ends_quietly_when_superseded_or_on_an_old_relay(self):
+        self.start_relay()
+        threading.Timer(0.3, lambda: self.store.listen("desktop", "s-listen", "newer-listener", time.time() + 60,
+                                                       time.time())).start()
+        self.assertEqual(self.hook("listen", {"session_id": "s-listen"}), (0, "", ""))
+        with mock.patch.object(tg.RelayClient, "_send_once", side_effect=tg.RelayHttpError(404, "not_found")):
+            self.assertEqual(self.hook("listen", {"session_id": "s-listen"}), (0, "", ""))
+        with mock.patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": ""}):
+            self.assertEqual(self.hook("listen", {}), (0, "", ""), "no session")
+
+    def test_session_end_hook_stops_listening(self):
+        self.start_relay()
+        self.store.listen("desktop", "s-end", "some-listener", time.time(), time.time())
+        self.assertEqual(self.hook("session-end", {"session_id": "s-end"}), (0, "", ""))
+        self.assertFalse(self.store.listening("desktop", "s-end", time.time()))
+
     def test_register_sends_hash_for_approval(self):
         self.start_relay()
         self.assertEqual(self.run_tg("register")[0], 1, "desktop is already in tg-clients.json")
@@ -190,6 +234,11 @@ class ClientPhase2Test(test_client.ClientTest):
         self.assertEqual(sum("hook stop" in c for c in commands), 1)
         self.assertEqual(hooks["Notification"][0]["matcher"], "permission_prompt")
         self.assertIn("hook user-prompt", hooks["UserPromptSubmit"][0]["hooks"][0]["command"])
+        listeners = [h for groups in hooks.values() for g in groups for h in g["hooks"] if "hook listen" in h["command"]]
+        self.assertEqual(len(listeners), 2, "one on Stop, one on UserPromptSubmit, also after a second install")
+        self.assertTrue(all(h["asyncRewake"] and h["timeout"] == 86400 for h in listeners))
+        self.assertIn("hook listen", hooks["Stop"][0]["hooks"][1]["command"])
+        self.assertIn("hook session-end", hooks["SessionEnd"][0]["hooks"][0]["command"])
         claude_md = (claude / "CLAUDE.md").read_text(encoding="utf-8")
         self.assertEqual(claude_md.count("`telegram`"), 1)
         self.assertIn("- other rule", claude_md)

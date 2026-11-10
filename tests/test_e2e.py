@@ -3,6 +3,7 @@ import json
 import os
 import re
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -151,6 +152,37 @@ class EndToEndTest(unittest.TestCase):
                              for c in self.fake.sent), what="/offen reply")
         edits = [c["params"]["text"] for c in self.fake.sent if c["method"] == "editMessageText"]
         self.assertEqual(sorted(bool(re.search("✔ beantwortet", t)) for t in edits), [True, True])
+
+    def test_e2e_reply_to_a_report_reaches_the_listening_session(self):
+        self.start_relay()
+        listener = subprocess.Popen([sys.executable, TG, "hook", "listen"], env=self.tg_env("desktop"),
+                                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                    text=True, encoding="utf-8")
+        self.addCleanup(lambda: listener.poll() is None and listener.kill())
+        listener.stdin.write(json.dumps({"session_id": "session-desktop"}))
+        listener.stdin.close()
+
+        def listening():
+            db = sqlite3.connect(self.relay_env["TG_DB_PATH"])
+            try:
+                return db.execute("SELECT listener FROM sessions WHERE session_key = 'session-desktop'").fetchone()
+            finally:
+                db.close()  # an open handle would keep Windows from deleting the temp folder
+
+        wait_for(listening, what="listener registered")
+        self.tg("desktop", "notify", "Zwischenstand: Login geht", "--title", "Login")
+        report = wait_for(lambda: next((c for c in self.fake.sent if c["method"] == "sendMessage"
+                                        and "Zwischenstand" in c["params"]["text"]), None), what="report sent")
+        time.sleep(0.5)  # the relay records the Telegram message id right after sending
+        self.fake.push_update({"message": {"message_id": 7, "chat": {"id": CHAT}, "from": {"id": CHAT},
+                                           "text": "Bitte auch Logout", "reply_to_message": {
+                                               "message_id": report["message_id"]}}})
+        out, err = listener.communicate(timeout=30)
+        self.assertEqual(listener.returncode, 2, err)
+        self.assertIn("Bitte auch Logout", out)
+        self.assertIn('"Zwischenstand: Login geht"', out)
+        wait_for(lambda: any(c["method"] == "sendMessage" and c["params"]["text"].startswith("➡️ an ")
+                             for c in self.fake.sent), what="passed-on confirmation")
 
 
 if __name__ == "__main__":

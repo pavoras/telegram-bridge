@@ -108,11 +108,28 @@ What the Claude Code hooks send. Right: `full`.
 - `stop`: schedule a "done" ping (unless `busy` or a question of the session is open)
 - `permission`: schedule a "waiting for approval" ping; `text` is the request
 - `prompt`: cancel the ping; with `human: true` also close the session's open questions
-  created before `ts` (as `answered_in_app`)
+  created before `ts` (as `answered_in_app`) and remember it as the user's last message
+- `end`: the session closed; its listener stops and pending replies are dropped
 
 Events older than the session's last event are ignored (`"result": "stale"`).
 `summary_blocked: true` replaces the text with "(summary withheld: possible secret)".
-Response: `{"result": "scheduled" | "cancelled" | "stale", "presence": "away" | "present"}`.
+Response: `{"result": "scheduled" | "cancelled" | "ended" | "stale", "presence": "away" | "present"}`.
+
+A scheduled ping is sent only in away mode, after a turn that ended at least an hour after the
+last human prompt, or (at once) when the last human message was a Telegram reply.
+
+### `GET /v1/sessions/{key}/listen?listener=<id>&started=<ts>&wait=<s>`
+
+Long poll of a session's listener (the `tg hook listen` hook). Right: `full`. `listener` is a
+random id (8–64 of `A-Za-z0-9_-`), `started` the listener's start time; the listener started
+last owns the session. `wait` ≤ 50 s. Listeners have their own connection slots (64) and rate
+limit (240 per minute and client).
+
+- `{"result": "reply", "reply": {"id", "text", "images": [media ids], "report": {"kind", "title",
+  "text": first line}}}`: a Telegram reply to one of the session's messages, handed over once.
+  The images can be downloaded with `GET /v1/media/{id}`.
+- `{"result": "idle"}`: nothing within `wait`; ask again.
+- `{"result": "superseded"}`: a newer listener took over, or the session ended; stop.
 
 ### `POST /v1/sessions/{key}`
 

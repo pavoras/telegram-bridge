@@ -28,8 +28,17 @@ TEXTS = {
     "reason_closed": {"en": "{code} was closed.", "de": "{code} wurde geschlossen."},
     # routing of incoming messages
     "selection_prompt": {"en": "Which question do you mean?", "de": "Welche Frage ist gemeint?"},
-    "not_waiting": {"en": "This session is not waiting on Telegram – please answer in the app.",
-                    "de": "Diese Session wartet nicht auf Telegram – bitte in der Claude-App antworten."},
+    "not_listening": {"en": "Not delivered: this session isn't listening (computer off, app closed or session "
+                            "ended). Please answer in the app.",
+                      "de": "Nicht zugestellt: Diese Session hört gerade nicht zu (Rechner aus, App geschlossen oder "
+                            "Session beendet). Bitte in der App antworten."},
+    "reply_permission": {"en": "Passed on as a message at the session's next step – approving still has to happen "
+                               "in the app.",
+                         "de": "Wird beim nächsten Schritt der Session als Nachricht übergeben – freigeben geht aber "
+                               "nur in der App."},
+    "reply_passed": {"en": "➡️ passed to {label}", "de": "➡️ an {label} übergeben"},
+    "reply_dropped": {"en": "Not delivered: the session stopped listening. Please answer in the app.",
+                      "de": "Nicht zugestellt: Die Session hört nicht mehr zu. Bitte in der App antworten."},
     "unsupported": {"en": "Only text and images (PNG, JPEG, WEBP) are supported.",
                     "de": "Nur Text und Bilder (PNG, JPEG, WEBP) werden unterstützt."},
     "late_album": {"en": "This image belongs to an album that was already assigned and was not taken over. "
@@ -48,12 +57,15 @@ TEXTS = {
                    "• reply to the question in Telegram (swipe)\n"
                    "• or start your message with #123\n"
                    "• or tap a button\n"
-                   "With only one open question, plain text is enough.\n\n{commands}",
+                   "With only one open question, plain text is enough.\n"
+                   "Reply to a report or ✅ ping of a Claude Code session to send it a message.\n\n{commands}",
              "de": "So antwortest du auf Fragen:\n"
                    "• In Telegram auf die Frage antworten (wischen)\n"
                    "• oder #123 am Anfang deiner Nachricht\n"
                    "• oder einen Button antippen\n"
-                   "Ist nur eine Frage offen, reicht einfacher Text.\n\n{commands}"},
+                   "Ist nur eine Frage offen, reicht einfacher Text.\n"
+                   "Antworte auf einen Bericht oder ✅-Ping einer Claude-Code-Session, um ihr zu schreiben.\n\n"
+                   "{commands}"},
     "now_away": {"en": "Status: away. Agents ask you here now.",
                  "de": "Status: unterwegs. Agenten fragen dich jetzt hier."},
     "now_present": {"en": "Status: at the computer.", "de": "Status: am Rechner."},

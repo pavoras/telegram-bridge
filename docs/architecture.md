@@ -33,7 +33,8 @@
 | `inbox_assign` | an incoming answer waiting for "which question do you mean?" (10 min) |
 | `albums`, `albums_done` | photo albums being collected (3 s) and where they went |
 | `media` | uploaded images (file on disk) and incoming photos (Telegram `file_id` only) |
-| `sessions` | per agent session: frozen origin, done delay, scheduled ping |
+| `sessions` | per agent session: frozen origin, done delay, scheduled ping, last human message, listener |
+| `replies` | Telegram replies to a session's reports, held until its listener takes them (5 min) |
 | `devices` | registration requests and approved devices (token hashes) |
 | `idempotency` | client idempotency keys → message |
 | `state` | Telegram offset, presence, paired chat, host status, daily switch, pairing code |
@@ -79,6 +80,21 @@ sends it when due unless the session asked a Telegram question meanwhile. Events
 the last one are ignored, so a spooled event that arrives late does no harm. Scheduling on the
 server means nothing has to keep running on the computer, and reboots lose nothing.
 
+A ping is planned on every `stop`, but sent only if presence is away when it is due, or the
+turn ended at least an hour after the last human prompt, or the last human message came from
+Telegram (then it is due at once).
+
+## Replies to sessions
+
+Each Claude Code session runs a listener hook (`tg hook listen`, `asyncRewake`) that long-polls
+`GET /v1/sessions/{key}/listen`. The relay records the listener and when it last asked. A
+swipe-reply to a `done`, `permission` or `report` message with a session key is stored in
+`replies` only if that listener asked within the last 90 s; otherwise the bot says at once
+that the session is not listening. The listener takes the reply, prints it and exits with
+code 2, and Claude Code hands it to the session. Replies nobody takes within 5 minutes, or
+pending when the session ends (`end` event from the `SessionEnd` hook), are dropped with a
+notice. Listeners started later win, so a stale listener can never steal a reply.
+
 The session's origin (computer, account, project) is frozen at first contact, so a later
 account switch on the computer does not relabel an existing session.
 
@@ -91,7 +107,8 @@ account switch on the computer does not relabel an existing session.
   copied as one file.
 - **Tokens per device, approved in Telegram.** No server access needed to add a computer;
   the 4-digit code prevents approving a stranger's request by mistake.
-- **No forwarding into finished sessions.** A reply to a done ping does not reach the session:
-  Claude Code has no supported way to inject a message into an idle session from outside.
-  Remote Control in the Claude apps covers that case.
+- **Replies only to listening sessions, nothing held.** A reply reaches a session only while
+  its listener hook runs; otherwise the bot says so right away instead of keeping the message
+  for a session that may never come back. Only swipe-replies go to sessions, so plain messages
+  keep their meaning (answers to questions).
 - **Text and images only.** No files, voice or arbitrary attachments.
