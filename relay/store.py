@@ -623,7 +623,7 @@ class Store:
             self._enqueue(db, "callback_answer", {"callback_query_id": callback_query_id, "text": text}, now)
 
     def outbox_due(self, now: float, limit: int) -> list:
-        rows = self._query("SELECT id, kind, payload, attempts FROM outbox WHERE status = 'pending'"
+        rows = self._query("SELECT id, kind, payload, attempts, created_at FROM outbox WHERE status = 'pending'"
                            " AND next_try_at <= ? ORDER BY id LIMIT ?", (now, limit))
         return [dict(r, payload=json.loads(r["payload"])) for r in rows]
 

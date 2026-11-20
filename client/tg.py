@@ -827,8 +827,9 @@ def cmd_install(args) -> int:
                     text = response.read().decode("utf-8")
             except (urllib.error.URLError, OSError) as e:
                 raise TgError(f"cannot download {name} from the relay ({type(e).__name__})") from None
-        else:
-            raise TgError(f"template missing: {template}; pass --relay URL")
+        else:  # a downloaded tg.py on a computer that has no config yet
+            raise TgError("this computer is not set up yet; run: "
+                          "tg install --relay URL --name NAME --host-label LABEL")
         (skill / name).write_text(text.replace("{{TG}}", runner), encoding="utf-8", newline="\n")
     _install_hooks(claude / "settings.json", runner)
     _install_claude_md(claude / "CLAUDE.md")

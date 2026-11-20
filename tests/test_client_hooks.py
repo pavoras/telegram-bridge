@@ -265,6 +265,16 @@ class ClientPhase2Test(test_client.ClientTest):
         self.assertIn("name: telegram", (skill / "SKILL.md").read_text(encoding="utf-8"))
         self.assertNotIn("{{TG}}", (skill / "AGENT-INSTRUCTIONS.md").read_text(encoding="utf-8"))
 
+    def test_downloaded_install_on_a_new_computer_explains_the_setup(self):
+        lone = Path(self.tmp.name) / "download" / "tg.py"
+        lone.parent.mkdir()
+        lone.write_text("# downloaded copy\n", encoding="utf-8")
+        self.assertFalse(Path(self.config_path).exists())
+        with mock.patch.object(tg, "__file__", str(lone)):
+            code, _, err = self.run_tg("install", "--claude-dir", str(Path(self.tmp.name) / "claude"))
+        self.assertNotEqual(code, 0)
+        self.assertIn("not set up yet", err)
+        self.assertIn("--relay URL --name NAME", err)
 
     def test_daily_reads_text_from_stdin_and_is_sent_once_per_day(self):
         self.start_relay()

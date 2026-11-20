@@ -66,16 +66,27 @@ class OutboundTest(unittest.TestCase):
         self.assertEqual(self.store.get_message(m["id"])["status"], "failed")
         self.assertEqual(self.store.outbox_due(T0 + 999, 10), [])
 
-    def test_transient_errors_back_off_and_give_up_after_10_attempts(self):
+    def test_transient_errors_survive_a_long_outage_then_deliver(self):
         m = self.question()
         now = T0
-        for attempt in range(10):
+        while now < T0 + 3 * 3600:  # a three-hour Telegram outage: 36 failed tries
             self.fake.fail_next("sendMessage", 502)
-            due = self.store.outbox_due(now, 10)
-            self.assertEqual(len(due), 1, attempt)
+            self.assertEqual(len(self.store.outbox_due(now, 10)), 1, now - T0)
             outbound.process_once(self.store, self.tg, CHAT, now)
-            now += 301
+            self.assertEqual(self.store.outbox_due(now, 10), [], "backs off")
+            now += outbound.MAX_BACKOFF + 1
+        outbound.process_once(self.store, self.tg, CHAT, now)
+        self.assertEqual(self.store.get_message(m["id"])["status"], "sent")
+
+    def test_transient_errors_give_up_after_a_day(self):
+        m = self.question()
+        self.fake.fail_next("sendMessage", 502)
+        outbound.process_once(self.store, self.tg, CHAT, T0 + outbound.MAX_AGE - 1)
+        self.assertEqual(self.store.get_message(m["id"])["status"], "queued")
+        self.fake.fail_next("sendMessage", 502)
+        outbound.process_once(self.store, self.tg, CHAT, T0 + outbound.MAX_AGE + 400)
         self.assertEqual(self.store.get_message(m["id"])["status"], "failed")
+        self.assertEqual(self.store.outbox_due(T0 + 2 * outbound.MAX_AGE, 10), [])
 
     def test_notice_is_escaped_and_replies(self):
         self.store.enqueue_notice("#123 <ist> erledigt", T0, reply_to_tg_id=77, buttons=[("#5 X", "a:1:2")])

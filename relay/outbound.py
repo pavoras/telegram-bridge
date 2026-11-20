@@ -9,7 +9,7 @@ from relay import format as fmt
 from relay.store import OPEN, Store
 from relay.telegram import TelegramClient, TelegramError
 
-MAX_ATTEMPTS = 10
+MAX_AGE = 24 * 3600  # transient errors (network, 5xx, 429) are retried this long: Telegram outages can last hours
 MAX_BACKOFF = 300
 SEND_INTERVAL = 1.0
 
@@ -77,7 +77,7 @@ def process_once(store: Store, tg: TelegramClient, chat_id: Optional[int], now: 
         _perform(store, tg, target, entry)
     except TelegramError as e:
         attempts = entry["attempts"] + 1
-        if e.permanent or attempts >= MAX_ATTEMPTS:
+        if e.permanent or now - entry["created_at"] >= MAX_AGE:
             log.warning("outbox %s %s failed permanently: %s", entry["id"], entry["kind"], e)
             store.outbox_fail(entry["id"])
         else:

@@ -62,7 +62,8 @@ wins (answer, button, expiry, closing by the agent or by activity in the app).
 - Every send or edit goes through the outbox: API calls only write to the database and return
   immediately, so a Telegram outage never blocks agents.
 - The worker sends at most about one message per second, honours `retry_after` on 429 and
-  retries with exponential backoff (up to 10 attempts); 4xx errors other than 429 are permanent
+  retries network errors, 5xx and 429 with exponential backoff (at most 5 minutes apart) for up
+  to 24 hours, so a message survives a Telegram outage of hours; 4xx errors other than 429 are permanent
   and counted in `/status` and the daily fallback.
 - Delivery is **at least once**: if Telegram's success response is lost, or the relay dies
   between sending and recording, the message can arrive twice. A delivery error never
